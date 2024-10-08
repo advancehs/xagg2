@@ -6,7 +6,7 @@ from .options import get_options,set_options
 from .auxfuncs import subset_find
 
 try:
-    import cartopy 
+    import cartopy
     import cartopy.crs as ccrs
     import cmocean
     import matplotlib as mpl
@@ -25,14 +25,14 @@ except ImportError:
 # in this case - but [aggregated], which contains [ds] as one of its
 # fields (for keeping the right variables / shapes upon export) may
 # result in a bloated variable (especially if [ds] is particularly
-# large). A fix could be to instead of [ds] replace it with just 
+# large). A fix could be to instead of [ds] replace it with just
 # what it needs; which is the sizes of all the variables, and the
 # coordinates. However, in that case, prep_for_nc() and prep_for_csv()
 # would have to be modified.
 
 class weightmap(object):
     """ Class for mapping from pixels to polgyons, output from :func:`xagg.wrappers.pixel_overlaps`
-    
+
     """
     def __init__(self,agg,source_grid,geometry,overlap_da=None,weights='nowghts'):
         self.agg = agg
@@ -40,22 +40,22 @@ class weightmap(object):
         self.geometry = geometry
         self.weights = weights
         self.overlap_da = overlap_da
-        
+
     def diag_fig(self,poly_id,ds,fig=None,ax=None):
         """ Create a diagnostic figure showing overlap between pixels and a given polygon
 
-        See `xagg.diag.diag_fig()` for more info. 
+        See `xagg.diag.diag_fig()` for more info.
         """
-        try: 
+        try:
             from . diag import diag_fig
         except ImportError:
             raise ImportError('`wm.diag_fig()` separately requires `cartopy`, `matplotlib`, and `cmocean` to function; make sure these are installed first.')
 
-        # Adjust grids between the input ds and the weightmap grid (in case subset to 
+        # Adjust grids between the input ds and the weightmap grid (in case subset to
         # bbox was used)
         with set_options(silent=True):
             ds = subset_find(ds,self.source_grid)
-        
+
         # Plot diagnostic figure
         fig,ax=diag_fig(self,poly_id,ds,fig=fig,ax=ax)
         return fig,ax
@@ -70,15 +70,16 @@ class weightmap(object):
 class aggregated(object):
     """ Class for aggregated data, output from :func:`xagg.core.aggregate`
     """
-    def __init__(self,agg,source_grid,geometry,ds_in,weights='nowghts'):
+    def __init__(self,agg,source_grid,geometry,ds_in,ds_out,weights='nowghts'):
         self.agg = agg
         self.source_grid = source_grid
         self.geometry = geometry
         self.ds_in = ds_in
+        self.ds_out = ds_out
         self.weights = weights
-    
+
     # Conversion functions
-    def to_dataset(self,loc_dim='poly_idx'):
+    def to_dataset(self):
         """ Convert to xarray dataset.
 
         Parameters
@@ -86,7 +87,7 @@ class aggregated(object):
         loc_dim : :py:class:`str`, by default `'poly_idx'`
             What to name the polygon dimension (e.g., 'county')
         """
-        ds_out = prep_for_nc(self,loc_dim=loc_dim)
+        ds_out = self.ds_out
         return ds_out
 
     def to_geodataframe(self):
@@ -131,13 +132,13 @@ class aggregated(object):
                    output_fn = fn,
                    loc_dim = loc_dim,
                    silent = silent)
-        
+
     def to_csv(self,fn,silent=None):
         """ Save as csv
 
         Parameters
         -----------------
-        
+
         fn : :py:class:`str`
             The target filename
 
@@ -151,7 +152,7 @@ class aggregated(object):
                    output_format = 'csv',
                    output_fn = fn,
                    silent=silent)
-        
+
     def to_shp(self,fn,silent=None):
         """ Save as shapefile
 
@@ -160,7 +161,7 @@ class aggregated(object):
 
         silent : :py:class:`bool`, by default False
             If `True`, silences status update
-            
+
         """
         if silent is None:
             silent = get_options()['silent']

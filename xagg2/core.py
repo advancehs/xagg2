@@ -364,9 +364,10 @@ def create_raster_polygons(ds,
     gdf_pixels['lon']=ds_bnds.lon.values
     if weights is not None:
         gdf_pixels['weights'] = weights.values
-
+    print("ds",ds)
     # Add a "pixel idx" to make indexing better later
     gdf_pixels['pix_idx'] = gdf_pixels.index.values
+    gdf_pixels['ds_want_to'] = ds.values
 
     # Add crs (normal lat/lon onto WGS84)
     gdf_pixels = gdf_pixels.set_crs("EPSG:4326")
@@ -472,7 +473,7 @@ def get_pixel_overlaps(gdf_in,pix_agg,impl=None):
         overlaps = gpd.overlay(gdf_in.to_crs(epsg_set),
                                pix_agg['gdf_pixels'].to_crs(epsg_set),
                                how='intersection')
-
+        print("aaaaaaaaaaaa",pix_agg['gdf_pixels'].to_crs(epsg_set))
     if overlaps.empty:
         raise NoOverlapError('No `ds` grid cells overlapped with any polygon in `gdf_in`. Check the input `ds` and `gdf_in`.')
     else:
@@ -614,71 +615,31 @@ def aggregate(ds,wm,impl=None,silent=None):
             weights = np.ones((len(wm.source_grid['lat'])))
 
     if impl=='dot_product':
-        data_dict = dict()
         for var in ds:
             # Process for every variable that has locational information, but isn't a
             # bound variable
             if ('bnds' not in ds[var].sizes) & ('loc' in ds[var].sizes):
                 if not silent:
                     print('aggregating '+var+'...')
-
-                # select just data for which we have overlaps
-                var_array = ds[var].sel(loc=wm.overlap_da['loc'])
-
-                # Get the dimensions of the variable that aren't "loc" (location)
-                other_dims = [k for k in np.atleast_1d(var_array.sizes) if k != 'loc']
-
-                # Check first if any nans are "complete" (meaning that a pixel
-                # either has values for each step, or nans for each step - if
-                # there are random nans within a pixel, throw a warning)
-                if (_warn_trigger_partialnan and
-                    (not xr.Dataset.equals(np.isnan(var_array).any(other_dims),
-                                           np.isnan(var_array).all(other_dims)))):
-                    warnings.warn('One or more pixels in variable '+var+' have *some* nans in the dimension(s) '+
-                                           ', '.join(other_dims)+
-                                           '. The code can currently only deal with pixels for which the '+
-                                           'pixel is *entirely* nan in all dimensions (or has no nans), however there is currently no '+
-                                           ' support for data in which pixels have only some nan values. The aggregation '+
-                                           'calculation is likely incorrect, since the weights will be different across different '+
-                                           'coordinates in the dimension(s) '+', '.join(other_dims)+'.')
-                    _warn_trigger_partialnan = False
-
-
-                # multiply percent-overlaps by user-supplied weights
-                weights_and_overlaps = wm.overlap_da * weights
-
-                # fill any nans in the gridded data to zero and change the corresponding
-                # weights to zero so that they will not affect the aggregated value
-                var_array_filled = var_array.fillna(0)
-                weights_and_overlaps = weights_and_overlaps.where(var_array.notnull(), 0)
-
-                # the weights now may add up to less than one because of nans or
-                # because of the user-supplied weights. here we normalize the
-                # weights so they add up to 1 and fill any nan's with 0 so they
-                # won't be counted
-                normed_weights = weights_and_overlaps/weights_and_overlaps.sum(dim = "loc", skipna=True)
-                normed_weights = normed_weights.fillna(0)
-
-                # finally we do the dot product to get the weighted averages
-                aggregated_array = normed_weights.dot(var_array_filled, dim='loc')
-
-                # if the original gridded values were all nan, make the final
-                # aggregation nan
-                if np.isnan(var_array.values).all():
-                    aggregated_array = aggregated_array * np.nan
-
-                data_dict[var] = aggregated_array
-
-        ds_combined = xr.Dataset(data_dict)
-
-        for var in ds:
-            if ('bnds' not in ds[var].sizes) & ('loc' in ds[var].sizes):
-                # convert to list of arrays - NOT SURE THIS IS THE RIGHT THING TO
-                # DO, JUST TRYING TO MATCH ORIGINAL FORMAT
-                wm.agg[var]=pd.Series([[[ds_combined[var].isel(poly_idx=i).values]] for i in range(len(ds_combined.poly_idx))])
+                # Create the column for the relevant variable
+                wm.agg[var] = None
+                ds_var = ds[var]
+                # Get weighted average of variable based on pixel overlap + other weights
+                for pix_idx in wm.agg.pix_idx:
+                    # Get relative areas for the pixels overlapping with this Polygon
+                    ds_var_cal = xr.DataArray(
+                        np.full_like(ds_var, np.nan),
+                        dims=ds_var.dims,
+                        coords=ds_var.coords,
+                        attrs=ds_var.attrs,
+                    )
+                    overlaps = wm.overlap_da
+                    area_fraction = overlaps.query('pix_idx=={}'.format(pix_idx))['area_fraction'].values
+                    var_value = ds_var.isel(loc=pix_idx).values
+                    ds_var_cal.isel(loc=pix_idx)[:] = var_value * area_fraction
         # Put in class format
         agg_out = aggregated(agg=wm.agg,source_grid=wm.source_grid,
-                            geometry=wm.geometry,ds_in=ds_combined,weights=wm.weights)
+        					 geometry=wm.geometry,ds_in=ds,ds_out = ds_var_cal,weights=wm.weights)
     elif impl=='for_loop':
         for var in ds:
             # Process for every variable that has locational information, but isn't a
@@ -688,60 +649,24 @@ def aggregate(ds,wm,impl=None,silent=None):
                     print('aggregating '+var+'...')
                 # Create the column for the relevant variable
                 wm.agg[var] = None
-
+                ds_var = ds[var]
                 # Get weighted average of variable based on pixel overlap + other weights
-                for poly_idx in wm.agg.poly_idx:
-                    # Get average value of variable over the polygon; weighted by
-                    # how much of the pixel area is in the polygon, and by (optionally)
-                    # a separate gridded weight. This if statement checks
-                    # - if the weights output for this polygon is just "np.nan", which
-                    #   indicates there's no overlap between the pixel grid and polygons
-                    # - [this has been pushed down a few lines] or, if all the pixels in
-                    #   the grid have just nan values for this variable
-                    # in both cases; the "aggregated variable" is just a vector of nans.
-                    if not np.isnan(wm.agg.iloc[poly_idx,:].pix_idxs).all():
-                        # Get the dimensions of the variable that aren't "loc" (location)
-                        other_dims = [k for k in np.atleast_1d(ds[var].sizes) if k != 'loc']
-                        # Check first if any nans are "complete" (meaning that a pixel
-                        # either has values for each step, or nans for each step - if
-                        # there are random nans within a pixel, throw a warning)
-                        if (_warn_trigger_partialnan and
-                            (not xr.Dataset.equals(np.isnan(ds[var].isel(loc=wm.agg.iloc[poly_idx,:].pix_idxs)).any(other_dims),
-                                                   np.isnan(ds[var].isel(loc=wm.agg.iloc[poly_idx,:].pix_idxs)).all(other_dims)))):
-                            warnings.warn('One or more pixels in variable '+var+' have *some* nans in the dimension(s) '+
-                                           ', '.join(other_dims)+
-                                           '. The code can currently only deal with pixels for which the '+
-                                           'pixel is *entirely* nan in all dimensions (or has no nans), however there is currently no '+
-                                           ' support for data in which pixels have only some nan values. The aggregation '+
-                                           'calculation is likely incorrect, since the weights will be different across different '+
-                                           'coordinates in the dimension(s) '+', '.join(other_dims)+'.')
-                            _warn_trigger_partialnan = False
-
-                        if not np.isnan(ds[var].isel(loc=wm.agg.iloc[poly_idx,:].pix_idxs)).all():
-                            # Get relative areas for the pixels overlapping with this Polygon
-                            tmp_areas = np.atleast_1d(np.squeeze(wm.agg.iloc[poly_idx,:].rel_area))
-                            # Replace overlapping pixel areas with nans if the corresponding pixel
-                            # is only composed of nans
-                            tmp_areas[np.array(np.isnan(ds[var].isel(loc=wm.agg.iloc[poly_idx,:].pix_idxs)).all(other_dims).values)] = np.nan
-                            # Calculate the normalized area+weight of each pixel (taking into account
-                            # nans)
-                            normed_areaweights = normalize(tmp_areas*weights[wm.agg.iloc[poly_idx,:].pix_idxs],drop_na=True)
-
-                            # Take the weighted average of all the pixel values to calculate the
-                            # aggregated value for the shapefile
-                            wm.agg.loc[poly_idx,var] = [[((ds[var].isel(loc=wm.agg.iloc[poly_idx,:].pix_idxs)*
-                                                             normed_areaweights).
-                                                            sum('loc')).values]]
-
-                        else:
-                            wm.agg.loc[poly_idx,var] = [[(ds[var].isel(loc=0)*np.nan).values]]
-
-                    else:
-                        wm.agg.loc[poly_idx,var] = [[(ds[var].isel(loc=0)*np.nan).values]]
+                for pix_idx in wm.agg.pix_idx:
+                    # Get relative areas for the pixels overlapping with this Polygon
+                    ds_var_cal = xr.DataArray(
+                        np.full_like(ds_var, np.nan),
+                        dims=ds_var.dims,
+                        coords=ds_var.coords,
+                        attrs=ds_var.attrs,
+                    )
+                    overlaps = wm.overlap_da
+                    area_fraction = overlaps.query('pix_idx=={}'.format(pix_idx))['area_fraction'].values
+                    var_value = ds_var.isel(loc=pix_idx).values
+                    ds_var_cal.isel(loc=pix_idx)[:] = var_value * area_fraction
 
         # Put in class format
         agg_out = aggregated(agg=wm.agg,source_grid=wm.source_grid,
-        					 geometry=wm.geometry,ds_in=ds,weights=wm.weights)
+        					 geometry=wm.geometry,ds_in=ds,ds_out = ds_var_cal,weights=wm.weights)
 
     # Return
     if not silent:
